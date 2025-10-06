@@ -20,10 +20,6 @@
 #define DEAD_ZONE_THRESHOLD 30
 
 #define FILTER_SIZE 16 
-uint16_t x_history[FILTER_SIZE] = {0};
-int x_idx = 0;
-uint16_t y_history[FILTER_SIZE] = {0};
-int y_idx = 0;
 
 typedef struct adc {
     int axis; 
@@ -63,6 +59,9 @@ void x_task(void *pvParameters) {
     adc_t adc_data;
     adc_data.axis = 0; 
     
+    static uint16_t x_history[FILTER_SIZE] = {0};
+    static int x_idx = 0;
+    
     TickType_t xLastWakeTime = xTaskGetTickCount();
     const TickType_t xFrequency = pdMS_TO_TICKS(100); 
 
@@ -89,6 +88,9 @@ void x_task(void *pvParameters) {
 void y_task(void *pvParameters) {
     adc_t adc_data;
     adc_data.axis = 1; 
+
+    static uint16_t y_history[FILTER_SIZE] = {0};
+    static int y_idx = 0;
 
     TickType_t xLastWakeTime = xTaskGetTickCount();
     const TickType_t xFrequency = pdMS_TO_TICKS(100); 
