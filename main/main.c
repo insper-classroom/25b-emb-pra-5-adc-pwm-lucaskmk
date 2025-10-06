@@ -19,7 +19,7 @@
 #define SCALE_FACTOR (255.0f / 2047.0f)
 #define DEAD_ZONE_THRESHOLD 30
 
-#define FILTER_SIZE 16 
+#define FILTER_SIZE 32 
 
 typedef struct adc {
     int axis; 
