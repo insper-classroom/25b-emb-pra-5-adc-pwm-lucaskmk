@@ -63,7 +63,7 @@ void x_task(void *pvParameters) {
     static int x_idx = 0;
     
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    const TickType_t xFrequency = pdMS_TO_TICKS(100); 
+    const TickType_t xFrequency = pdMS_TO_TICKS(20); 
 
     for (;;) {
         adc_select_input(ADC_X_CHANNEL);
@@ -79,7 +79,11 @@ void x_task(void *pvParameters) {
         uint16_t filtered_adc = (uint16_t)(sum / FILTER_SIZE);
         
         adc_data.val = scale_and_apply_dead_zone(filtered_adc);
-        xQueueSend(xQueueADC, &adc_data, 0);
+        
+        // CORREÇÃO CRÍTICA: Só envia para a fila se houver movimento (val != 0).
+        if (adc_data.val != 0) {
+            xQueueSend(xQueueADC, &adc_data, 0);
+        }
 
         vTaskDelayUntil(&xLastWakeTime, xFrequency);
     }
@@ -93,7 +97,7 @@ void y_task(void *pvParameters) {
     static int y_idx = 0;
 
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    const TickType_t xFrequency = pdMS_TO_TICKS(100); 
+    const TickType_t xFrequency = pdMS_TO_TICKS(20); 
 
     for (;;) {
         adc_select_input(ADC_Y_CHANNEL);
@@ -109,7 +113,11 @@ void y_task(void *pvParameters) {
         uint16_t filtered_adc = (uint16_t)(sum / FILTER_SIZE);
 
         adc_data.val = scale_and_apply_dead_zone(filtered_adc);
-        xQueueSend(xQueueADC, &adc_data, 0);
+
+        // CORREÇÃO CRÍTICA: Só envia para a fila se houver movimento (val != 0).
+        if (adc_data.val != 0) {
+            xQueueSend(xQueueADC, &adc_data, 0);
+        }
 
         vTaskDelayUntil(&xLastWakeTime, xFrequency);
     }
@@ -119,22 +127,23 @@ void uart_task(void *pvParameters) {
     adc_t received_data;
     
     for (;;) {
+        // A task espera aqui até receber um dado na fila. Como a fila só tem dados != 0,
+        // isso elimina o delay de processamento dos zeros.
         if (xQueueReceive(xQueueADC, &received_data, portMAX_DELAY) == pdPASS) {
             
-            if (received_data.val != 0) {
-                
-                int16_t value = (int16_t)received_data.val;
-                
-                uint8_t val_0_lsb = (uint8_t)(value & 0xFF);
-                uint8_t val_1_msb = (uint8_t)((value >> 8) & 0xFF);
+            int16_t value = (int16_t)received_data.val;
+            
+            uint8_t val_0_lsb = (uint8_t)(value & 0xFF);
+            uint8_t val_1_msb = (uint8_t)((value >> 8) & 0xFF);
 
-                uart_putc_raw(UART_ID, (uint8_t)received_data.axis);
-                uart_putc_raw(UART_ID, val_1_msb);
-                uart_putc_raw(UART_ID, val_0_lsb);
-                uart_putc_raw(UART_ID, EOP_BYTE);
-                
-                vTaskDelay(pdMS_TO_TICKS(5));
-            }
+            // Sequência: AXIS VAL_1 VAL_0 EOP
+            uart_putc_raw(UART_ID, (uint8_t)received_data.axis);
+            uart_putc_raw(UART_ID, val_1_msb);
+            uart_putc_raw(UART_ID, val_0_lsb);
+            uart_putc_raw(UART_ID, EOP_BYTE);
+            
+            // Um pequeno delay para evitar sobrecarga da UART/Python.
+            vTaskDelay(pdMS_TO_TICKS(5));
         }
     }
 }
