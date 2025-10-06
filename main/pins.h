@@ -1,12 +1,19 @@
 #ifndef PINS_H
 #define PINS_H
 
-const int BTN_PIN_R = 4;
-const int BTN_PIN_G = 5;
-const int BTN_PIN_B = 6;
-const int LED_PIN_R = 7;
-const int LED_PIN_G = 8;
-const int LED_PIN_B = 9;
+#define ADC_X_PIN 26
+#define ADC_Y_PIN 27
 
+#define ADC_X_CHANNEL 0 
+#define ADC_Y_CHANNEL 1 
 
-#endif // PINS_H
+#define BTN_PIN_R 4
+#define BTN_PIN_G 5
+#define BTN_PIN_B 6
+#define LED_PIN_R 7
+#define LED_PIN_G 8
+#define LED_PIN_B 9
+
+#define EOP_BYTE 0xFF 
+
+#endif
