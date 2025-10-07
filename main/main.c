@@ -14,13 +14,13 @@
 #define UART_RX_PIN 1
 #define EOP_BYTE 0xFF
 
-#define NUM_SAMPLES        32
-#define READ_MS            120
-#define DEAD_ZONE          300
-#define TARGET_DELTA       10
-#define ZERO_HOLD_CNT      4
-#define RAMP_STEP          2
-#define SEND_INTERVAL_MS   80
+#define NUM_SAMPLES        128   // filtro mais pesado
+#define READ_MS            600   // lê o ADC a cada 600 ms
+#define DEAD_ZONE          400   // zona morta maior
+#define TARGET_DELTA       20    // ignora pequenas variações
+#define ZERO_HOLD_CNT      6     // só zera após 6 leituras seguidas estáveis
+#define RAMP_STEP          1     // movimento extremamente suave
+#define SEND_INTERVAL_MS   300   // envia a cada 300 ms
 
 typedef struct {
     uint8_t axis;
