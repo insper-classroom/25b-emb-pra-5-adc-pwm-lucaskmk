@@ -2,7 +2,6 @@
 #include "task.h"
 #include "queue.h"
 #include <stdio.h>
-#include <math.h>
 #include "pico/stdlib.h"
 #include "hardware/adc.h"
 #include "hardware/uart.h"
@@ -14,139 +13,94 @@
 #define UART_RX_PIN 1
 #define EOP_BYTE 0xFF
 
-#define NUM_SAMPLES 128
-#define READ_MS 1500
-#define SEND_INTERVAL_MS 1000
-#define DEAD_ZONE          500
-#define TARGET_DELTA       25
-#define ZERO_HOLD_CNT      8
-#define RAMP_STEP          1
+#define FILTER_DEPTH 12
+#define ADC_CENTER 2048
+#define ADC_TOLERANCE 150
+#define MAX_SPEED 10
+#define READ_DELAY_MS 25
 
 typedef struct {
     uint8_t axis;
-    int16_t target;
-} target_msg_t;
+    int16_t value;
+} axis_msg_t;
 
-static QueueHandle_t xQueueTargets = NULL;
+static QueueHandle_t qAxisData;
 
-static inline int map_int(int x, int in_min, int in_max, int out_min, int out_max) {
-    return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+static int16_t process_adc(uint16_t raw, uint16_t history[], uint8_t *idx, uint32_t *acc) {
+    *acc -= history[*idx];
+    history[*idx] = raw;
+    *acc += raw;
+    *idx = (*idx + 1) % FILTER_DEPTH;
+    uint16_t mean = *acc / FILTER_DEPTH;
+
+    int16_t result = 0;
+    if (mean > ADC_CENTER + ADC_TOLERANCE) {
+        result = (int16_t)((mean - (ADC_CENTER + ADC_TOLERANCE)) * MAX_SPEED / (4095 - (ADC_CENTER + ADC_TOLERANCE)));
+    } else if (mean < ADC_CENTER - ADC_TOLERANCE) {
+        result = (int16_t)((mean - (ADC_CENTER - ADC_TOLERANCE)) * MAX_SPEED / (ADC_CENTER - ADC_TOLERANCE));
+    }
+    if (result > MAX_SPEED) result = MAX_SPEED;
+    if (result < -MAX_SPEED) result = -MAX_SPEED;
+    return result;
 }
 
-void adc_init_all(void) {
-    adc_init();
-    adc_gpio_init(ADC_X_PIN);
-    adc_gpio_init(ADC_Y_PIN);
-}
+static void joystick_task(void *p) {
+    uint8_t axis_id = (uint8_t)(uintptr_t)p;
+    adc_select_input(axis_id);
+    uint16_t buffer[FILTER_DEPTH] = {0};
+    uint8_t idx = 0;
+    uint32_t acc = 0;
 
-void uart_init_all(void) {
-    uart_init(UART_ID, BAUD_RATE);
-    gpio_set_function(UART_TX_PIN, GPIO_FUNC_UART);
-    gpio_set_function(UART_RX_PIN, GPIO_FUNC_UART);
-}
-
-void axis_reader_loop(int adc_channel, int axis_id) {
-    uint16_t samples[NUM_SAMPLES];
-    int idx = 0;
-    int zero_hold = 0;
-    int16_t last_local_target = 0;
-    const TickType_t period = pdMS_TO_TICKS(READ_MS);
-
-    for (int i = 0; i < NUM_SAMPLES; ++i) {
-        adc_select_input(adc_channel);
-        samples[i] = adc_read();
-        vTaskDelay(pdMS_TO_TICKS(1));
+    for (int i = 0; i < FILTER_DEPTH; i++) {
+        adc_select_input(axis_id);
+        uint16_t val = adc_read();
+        buffer[i] = val;
+        acc += val;
+        vTaskDelay(pdMS_TO_TICKS(2));
     }
 
-    for (;;) {
-        adc_select_input(adc_channel);
+    while (1) {
+        adc_select_input(axis_id);
         uint16_t raw = adc_read();
-        samples[idx] = raw;
-        idx = (idx + 1) % NUM_SAMPLES;
-
-        uint32_t sum = 0;
-        for (int i = 0; i < NUM_SAMPLES; ++i) sum += samples[i];
-        int filtered = (int)(sum / NUM_SAMPLES);
-
-        int mapped = map_int(filtered, 0, 4095, -255, 255);
-
-        if (mapped > -DEAD_ZONE && mapped < DEAD_ZONE) {
-            zero_hold++;
-            if (zero_hold >= ZERO_HOLD_CNT) mapped = 0;
-            else mapped = last_local_target;
-        } else zero_hold = 0;
-
-        if (abs(mapped - last_local_target) >= TARGET_DELTA) {
-            target_msg_t m;
-            m.axis = (uint8_t)axis_id;
-            m.target = (int16_t)mapped;
-            xQueueSend(xQueueTargets, &m, 0);
-            last_local_target = m.target;
+        int16_t speed = process_adc(raw, buffer, &idx, &acc);
+        if (speed != 0) {
+            axis_msg_t msg = { .axis = axis_id, .value = speed };
+            xQueueSend(qAxisData, &msg, 0);
         }
-
-        vTaskDelay(period);
+        vTaskDelay(pdMS_TO_TICKS(READ_DELAY_MS));
     }
 }
 
-void x_task(void *pv) { (void)pv; axis_reader_loop(ADC_X_CHANNEL, 0); }
-void y_task(void *pv) { (void)pv; axis_reader_loop(ADC_Y_CHANNEL, 1); }
-
-static void send_packet_msb_first(uint8_t axis, int16_t value) {
-    uint8_t msb = (uint8_t)((value >> 8) & 0xFF);
-    uint8_t lsb = (uint8_t)(value & 0xFF);
-    uart_putc_raw(UART_ID, axis);
-    uart_putc_raw(UART_ID, msb);
-    uart_putc_raw(UART_ID, lsb);
-    uart_putc_raw(UART_ID, EOP_BYTE);
-}
-
-void uart_ramp_task(void *pvParameters) {
-    (void)pvParameters;
-    int16_t target_vals[2] = {0,0};
-    int16_t current_vals[2] = {0,0};
-    int16_t last_sent[2] = {32767,32767};
-    const TickType_t period = pdMS_TO_TICKS(SEND_INTERVAL_MS);
-    target_msg_t m;
-
-    for (;;) {
-        while (xQueueReceive(xQueueTargets, &m, 0) == pdPASS) {
-            if (m.axis < 2) target_vals[m.axis] = m.target;
+static void uart_sender_task(void *p) {
+    axis_msg_t msg;
+    while (1) {
+        if (xQueueReceive(qAxisData, &msg, portMAX_DELAY) == pdPASS) {
+            uint8_t lsb = msg.value & 0xFF;
+            uint8_t msb = (msg.value >> 8) & 0xFF;
+            uart_putc_raw(UART_ID, 0xFF);
+            uart_putc_raw(UART_ID, msg.axis);
+            uart_putc_raw(UART_ID, lsb);
+            uart_putc_raw(UART_ID, msb);
         }
-
-        for (int axis = 0; axis < 2; ++axis) {
-            int16_t tgt = target_vals[axis];
-            int16_t cur = current_vals[axis];
-
-            if (tgt != cur) {
-                int delta = tgt - cur;
-                if (abs(delta) > RAMP_STEP)
-                    cur += (delta > 0) ? RAMP_STEP : -RAMP_STEP;
-                else
-                    cur = tgt;
-
-                current_vals[axis] = cur;
-
-                if (cur != last_sent[axis]) {
-                    send_packet_msb_first((uint8_t)axis, cur);
-                    last_sent[axis] = cur;
-                }
-            }
-        }
-        vTaskDelay(period);
     }
 }
 
 int main(void) {
     stdio_init_all();
-    adc_init_all();
-    uart_init_all();
+    adc_init();
+    adc_gpio_init(ADC_X_PIN);
+    adc_gpio_init(ADC_Y_PIN);
 
-    xQueueTargets = xQueueCreate(8, sizeof(target_msg_t));
-    if (xQueueTargets == NULL) for (;;);
+    uart_init(UART_ID, BAUD_RATE);
+    gpio_set_function(UART_TX_PIN, GPIO_FUNC_UART);
+    gpio_set_function(UART_RX_PIN, GPIO_FUNC_UART);
 
-    xTaskCreate(x_task, "x_task", configMINIMAL_STACK_SIZE, NULL, 2, NULL);
-    xTaskCreate(y_task, "y_task", configMINIMAL_STACK_SIZE, NULL, 2, NULL);
-    xTaskCreate(uart_ramp_task, "uart_ramp", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
+    qAxisData = xQueueCreate(16, sizeof(axis_msg_t));
+    if (!qAxisData) while (1);
+
+    xTaskCreate(joystick_task, "X_Axis", 256, (void *)0, 1, NULL);
+    xTaskCreate(joystick_task, "Y_Axis", 256, (void *)1, 1, NULL);
+    xTaskCreate(uart_sender_task, "UART", 256, NULL, 1, NULL);
 
     vTaskStartScheduler();
     for (;;);
