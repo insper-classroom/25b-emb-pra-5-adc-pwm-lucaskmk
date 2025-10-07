@@ -1,5 +1,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
+#include "semphr.h"
+#include "queue.h"
 #include <stdio.h>
 #include <math.h>
 #include "pico/stdlib.h"
@@ -12,15 +14,13 @@
 #define UART_TX_PIN 0
 #define UART_RX_PIN 1
 #define EOP_BYTE 0xFF
-
-#define NUM_SAMPLES 48
-#define READ_MS  200
-#define DEAD_ZONE 400
-#define TARGET_DELTA  20
-#define ZERO_HOLD_CNT 6
-#define RAMP_STEP  2
-#define SEND_INTERVAL_MS 120
-#define MIN_SEND_INTERVAL_MS 200
+#define NUM_SAMPLES 32
+#define READ_MS 120
+#define DEAD_ZONE 300
+#define TARGET_DELTA 10
+#define ZERO_HOLD_CNT 4
+#define RAMP_STEP 2
+#define SEND_INTERVAL_MS 80
 
 static volatile int16_t target_vals[2] = {0,0};
 static volatile int16_t current_vals[2] = {0,0};
@@ -86,23 +86,20 @@ void axis_reader_loop(int adc_channel, int axis_id) {
 void x_task(void *pv) { (void)pv; axis_reader_loop(ADC_X_CHANNEL, 0); }
 void y_task(void *pv) { (void)pv; axis_reader_loop(ADC_Y_CHANNEL, 1); }
 
-static void send_packet_msb_first(uint8_t axis, int16_t value) {
+static void send_packet_lsb_first(uint8_t axis, int16_t value) {
     uint8_t msb = (uint8_t)((value >> 8) & 0xFF);
     uint8_t lsb = (uint8_t)(value & 0xFF);
-    uart_putc_raw(UART_ID, axis);
-    uart_putc_raw(UART_ID, msb);
-    uart_putc_raw(UART_ID, lsb);
     uart_putc_raw(UART_ID, EOP_BYTE);
+    uart_putc_raw(UART_ID, axis);
+    uart_putc_raw(UART_ID, lsb);
+    uart_putc_raw(UART_ID, msb);
 }
 
 void uart_ramp_task(void *pvParameters) {
     (void)pvParameters;
     const TickType_t period = pdMS_TO_TICKS(SEND_INTERVAL_MS);
     int16_t last_sent[2] = {0, 0};
-    TickType_t last_send_tick[2] = {0, 0};
-    const TickType_t min_send_ticks = pdMS_TO_TICKS(MIN_SEND_INTERVAL_MS);
     for (;;) {
-        TickType_t now = xTaskGetTickCount();
         for (int axis = 0; axis < 2; ++axis) {
             int16_t tgt, cur;
             taskENTER_CRITICAL();
@@ -117,17 +114,15 @@ void uart_ramp_task(void *pvParameters) {
                 taskENTER_CRITICAL();
                 current_vals[axis] = cur;
                 taskEXIT_CRITICAL();
-                if (cur != last_sent[axis] && (now - last_send_tick[axis]) >= min_send_ticks) {
-                    send_packet_msb_first((uint8_t)axis, cur);
+                if (cur != last_sent[axis]) {
+                    send_packet_lsb_first((uint8_t)axis, cur);
                     last_sent[axis] = cur;
-                    last_send_tick[axis] = now;
                 }
                 sleep_ms(2);
             } else {
-                if (cur != last_sent[axis] && (now - last_send_tick[axis]) >= min_send_ticks) {
-                    send_packet_msb_first((uint8_t)axis, cur);
+                if (cur != last_sent[axis]) {
+                    send_packet_lsb_first((uint8_t)axis, cur);
                     last_sent[axis] = cur;
-                    last_send_tick[axis] = now;
                     sleep_ms(2);
                 }
             }
