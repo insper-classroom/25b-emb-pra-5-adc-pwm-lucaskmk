@@ -16,7 +16,7 @@
 #define FILTER_DEPTH 12
 #define ADC_CENTER 2048
 #define ADC_TOLERANCE 150
-#define MAX_SPEED 10
+#define MAX_SPEED 15
 #define READ_DELAY_MS 25
 
 typedef struct {
